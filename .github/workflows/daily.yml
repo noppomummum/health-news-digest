@@ -1,0 +1,28 @@
+name: Daily health digest
+
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 1am UTC = 8am Bangkok
+  workflow_dispatch:       # also lets you trigger it manually from the Actions tab
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the digest script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_ADDRESS:  ${{ secrets.GMAIL_ADDRESS }}
+          APP_PASSWORD:   ${{ secrets.APP_PASSWORD }}
+        run: python summarize_news.py
