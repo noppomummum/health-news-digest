@@ -20,7 +20,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or ""
 GMAIL_ADDRESS  = os.environ.get("GMAIL_ADDRESS")  or ""
 APP_PASSWORD   = os.environ.get("APP_PASSWORD")   or ""
 
-# Thai edition of Google News, Thai search terms (health / disease / illness / hospital)
 FEED_URL = (
     "https://news.google.com/rss/search?q="
     "%E0%B8%AA%E0%B8%B8%E0%B8%82%E0%B8%A0%E0%B8%B2%E0%B8%9E+OR+"
@@ -29,27 +28,23 @@ FEED_URL = (
     "%E0%B9%82%E0%B8%A3%E0%B8%87%E0%B8%9E%E0%B8%A2%E0%B8%B2%E0%B8%9A%E0%B8%B2%E0%B8%A5"
     "&hl=th&gl=TH&ceid=TH:th"
 )
-MODEL = "gemini-2.5-flash-lite"
+SELECT_MODEL = "gemini-2.5-flash-lite"   # simple job, lite is fine
+SUMMARY_MODEL = "gemini-2.5-flash"        # harder job, full flash handles Thai better
 NUM_PICKS = 3
 
 
-# ---------- AI helper with retry ----------
-def call_ai(client, prompt, use_url_context=False):
-    tools = [types.Tool(url_context=types.UrlContext())] if use_url_context else None
-    config = types.GenerateContentConfig(tools=tools, max_output_tokens=8000)
+# ---------- AI helper with retry (no URL context anymore) ----------
+def call_ai(client, model, prompt):
+    config = types.GenerateContentConfig(max_output_tokens=8000)
     for attempt in range(5):
         wait = 5 * (attempt + 1)
         try:
             resp = client.models.generate_content(
-                model=MODEL, contents=prompt, config=config,
+                model=model, contents=prompt, config=config,
             )
-            text = resp.text or ""
-            if text.strip():
-                if not use_url_context:
-                    return resp
-                if len(re.findall(r"(?:===\s*SUMMARY|SUMMARY)\s*\d+", text)) >= 2:
-                    return resp
-            print(f"Incomplete reply on attempt {attempt + 1}; waiting {wait}s.")
+            if resp.text and resp.text.strip():
+                return resp
+            print(f"Empty reply on attempt {attempt + 1}; waiting {wait}s.")
         except (genai_errors.ServerError, genai_errors.ClientError) as e:
             print(f"Model error on attempt {attempt + 1} ({type(e).__name__}); waiting {wait}s.")
         time.sleep(wait)
@@ -87,43 +82,44 @@ def build_and_send_digest():
         "และการสร้างความตระหนักด้านสุขภาพมากที่สุด เรียงจากสำคัญที่สุดก่อน "
         f"ตอบกลับเป็นตัวเลข {NUM_PICKS} ตัวคั่นด้วยจุลภาคเท่านั้น เช่น: 4, 11, 2"
     )
-    selection_response = call_ai(client, selection_prompt)
+    selection_response = call_ai(client, SELECT_MODEL, selection_prompt)
     choices = [int(n) for n in re.findall(r"\d+", selection_response.text)][:NUM_PICKS]
     chosen = [articles[c - 1] for c in choices]
 
+    # Build the article block from headline + snippet (no URL fetching)
     article_block = ""
     for rank, a in enumerate(chosen, start=1):
         snippet = getattr(a, "summary", "")
-        article_block += (
-            f"Article {rank}:\nTitle: {a.title}\nSnippet: {snippet}\nURL: {a.link}\n\n"
-        )
+        snippet = re.sub(r"<[^>]+>", "", snippet)  # strip any HTML tags from snippet
+        article_block += f"ข่าวที่ {rank}:\nพาดหัว: {a.title}\nเนื้อหาย่อ: {snippet}\n\n"
 
-    # Second AI call: detailed Thai summaries, max 200 words each
+    # Second AI call: Thai summaries from headline + snippet
     summary_prompt = (
-        "คุณกำลังเขียนสรุปข่าวสุขภาพประจำวันให้คนทั่วไปอ่าน เพื่อสร้างความตระหนักด้านสุขภาพ "
-        "สำหรับข่าวทั้งสามข่าวด้านล่าง ให้เปิดลิงก์ URL อ่านเนื้อหาเต็ม แล้วเขียนสรุปเป็น"
-        "ภาษาไทยที่อ่านง่าย น่าสนใจ ชวนอ่าน ความยาวไม่เกิน 200 คำต่อข่าว\n\n"
+        "คุณกำลังเขียนสรุปข่าวสุขภาพประจำวันให้คนทั่วไปอ่าน เพื่อสร้างความตระหนักด้านสุขภาพ\n"
+        "สำหรับข่าวทั้งสามข่าวด้านล่าง ให้เขียนสรุปเป็นภาษาไทยที่อ่านง่าย น่าสนใจ ชวนอ่าน "
+        "ความยาวไม่เกิน 200 คำต่อข่าว โดยอ้างอิงจากพาดหัวและเนื้อหาย่อที่ให้มา\n\n"
         "แต่ละข่าวให้เขียนตามนี้:\n"
         "  - บรรทัดแรก: พาดหัวสั้น ๆ ที่ดึงดูดความสนใจ ขึ้นต้นด้วยอิโมจิที่เหมาะสม 1 ตัว\n"
         "  - บรรทัดถัดมา 'ทำไมถึงสำคัญ:' ตามด้วยประโยคเดียวที่บอกว่าทำไมผู้อ่านควรสนใจ\n"
-        "  - ย่อหน้าสรุป: เกิดอะไรขึ้น ข้อเท็จจริงและตัวเลขสำคัญ และมีความหมายอย่างไรต่อสุขภาพ"
-        "ของคนทั่วไป เขียนเป็นภาษาที่เข้าใจง่าย แปลศัพท์แพทย์ให้เป็นภาษาธรรมดา\n\n"
-        "ใช้ภาษาที่เป็นมิตร ชวนอ่าน แต่คงความถูกต้องและเป็นกลาง ไม่ให้คำแนะนำทางการแพทย์ส่วนบุคคล "
-        "ถ้าเปิดลิงก์ไม่ได้ ให้สรุปจากพาดหัวและ snippet เท่าที่มี และเขียน '(สรุปจากพาดหัวเท่านั้น)' ต่อท้าย\n\n"
+        "  - ย่อหน้าสรุป: อธิบายว่าข่าวเกี่ยวกับอะไร และมีความหมายอย่างไรต่อสุขภาพของคนทั่วไป "
+        "ด้วยภาษาที่เข้าใจง่าย\n\n"
+        "ใช้ภาษาที่เป็นมิตร ชวนอ่าน คงความถูกต้องและเป็นกลาง ไม่ให้คำแนะนำทางการแพทย์ส่วนบุคคล\n\n"
         + article_block
-        + "ตอบกลับตามรูปแบบนี้เป๊ะ ๆ ห้ามใส่ JSON ห้ามใส่ code fence ห้ามมีคำอธิบายเพิ่ม:\n\n"
+        + "ตอบกลับตามรูปแบบนี้เป๊ะ ๆ ห้ามใส่ JSON ห้ามใส่ code fence:\n\n"
         "=== SUMMARY 1 ===\n<สรุปข่าวที่ 1>\n\n"
         "=== SUMMARY 2 ===\n<สรุปข่าวที่ 2>\n\n"
         "=== SUMMARY 3 ===\n<สรุปข่าวที่ 3>"
     )
-    summary_response = call_ai(client, summary_prompt, use_url_context=True)
+    summary_response = call_ai(client, SUMMARY_MODEL, summary_prompt)
+
+    # Split tolerantly
     raw = summary_response.text.strip()
     parts = re.split(r"(?:===\s*)?SUMMARY\s*\d+(?:\s*===)?", raw)
     summaries = [p.strip() for p in parts[1:] if p.strip()]
     if not summaries:
         summaries = [raw]
 
-    # Compose a friendly, readable email body
+    # Compose a friendly, readable email
     lines = [
         "🌅 สวัสดีตอนเช้า! นี่คือสรุปข่าวสุขภาพประจำวันของคุณ",
         "อ่านสั้น ๆ วันละ 3 ข่าว เพื่อสุขภาพที่ดีขึ้น 💪",
