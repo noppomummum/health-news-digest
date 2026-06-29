@@ -47,7 +47,7 @@ def call_ai(client, prompt, use_url_context=False):
             if text.strip():
                 if not use_url_context:
                     return resp
-                if text.count("=== SUMMARY") >= 3:
+                if len(re.findall(r"(?:===\s*SUMMARY|SUMMARY)\s*\d+", text)) >= 2:
                     return resp
             print(f"Incomplete reply on attempt {attempt + 1}; waiting {wait}s.")
         except (genai_errors.ServerError, genai_errors.ClientError) as e:
@@ -117,8 +117,11 @@ def build_and_send_digest():
         "=== SUMMARY 3 ===\n<สรุปข่าวที่ 3>"
     )
     summary_response = call_ai(client, summary_prompt, use_url_context=True)
-    parts = re.split(r"===\s*SUMMARY\s*\d+\s*===", summary_response.text.strip())
-    summaries = [p.strip() for p in parts[1:]]
+    raw = summary_response.text.strip()
+    parts = re.split(r"(?:===\s*)?SUMMARY\s*\d+(?:\s*===)?", raw)
+    summaries = [p.strip() for p in parts[1:] if p.strip()]
+    if not summaries:
+        summaries = [raw]
 
     # Compose a friendly, readable email body
     lines = [
